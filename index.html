@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mythos 9B 本地对话</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #0a0a0f; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+  #header { padding: 12px 16px; background: #12121a; border-bottom: 1px solid #222; display: flex; align-items: center; gap: 12px; }
+  #status { font-size: 13px; color: #888; }
+  #status.ready { color: #4ade80; }
+  #status.loading { color: #facc15; }
+  #status.error { color: #f87171; }
+  #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 85%; padding: 10px 14px; border-radius: 12px; line-height: 1.6; font-size: 14px; white-space: pre-wrap; word-break: break-word; }
+  .user { align-self: flex-end; background: #1e3a5f; border-bottom-right-radius: 4px; }
+  .assistant { align-self: flex-start; background: #1a1a24; border: 1px solid #2a2a3a; border-bottom-left-radius: 4px; }
+  .system { align-self: center; color: #666; font-size: 12px; text-align: center; padding: 4px 12px; }
+  #input-area { padding: 12px 16px; background: #12121a; border-top: 1px solid #222; display: flex; gap: 8px; }
+  #input { flex: 1; background: #1a1a24; border: 1px solid #2a2a3a; border-radius: 8px; padding: 10px 14px; color: #e0e0e0; font-size: 14px; outline: none; resize: none; }
+  #input:focus { border-color: #3b5bdb; }
+  #send { background: #3b5bdb; color: white; border: none; border-radius: 8px; padding: 10px 20px; cursor: pointer; font-size: 14px; }
+  #send:disabled { background: #333; color: #666; cursor: not-allowed; }
+  #send:hover:not(:disabled) { background: #4c6ef5; }
+  #progress { width: 100%; height: 3px; background: #222; }
+  #progress-bar { height: 100%; background: #3b5bdb; width: 0%; transition: width 0.3s; }
+  .model-selector { display: flex; gap: 8px; align-items: center; }
+  select { background: #1a1a24; color: #e0e0e0; border: 1px solid #2a2a3a; border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+  #load-btn { background: #2a2a3a; color: #e0e0e0; border: 1px solid #3a3a4a; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
+  #load-btn:hover { background: #3a3a4a; }
+</style>
+</head>
+<body>
+<div id="header">
+  <strong style="font-size:15px;">Mythos 9B</strong>
+  <div class="model-selector">
+    <select id="model-select">
+      <option value="MaralGPT/MaralGPT-Mythos-9B-2606-GGUF/resolve/main/MaralGPT-Mythos-9B-2606-Q4_K_M.gguf">Q4_K_M (约 5.5GB，推荐)</option>
+      <option value="MaralGPT/MaralGPT-Mythos-9B-2606-GGUF/resolve/main/MaralGPT-Mythos-9B-2606-Q8_0.gguf">Q8_0 (约 9.5GB，高质量)</option>
+    </select>
+    <button id="load-btn">加载模型</button>
+  </div>
+  <span id="status">就绪</span>
+</div>
+<div id="progress"><div id="progress-bar"></div></div>
+<div id="chat">
+  <div class="system">选择量化版本后点击「加载模型」。首次加载需下载，之后缓存在浏览器中，可离线使用。</div>
+</div>
+<div id="input-area">
+  <textarea id="input" rows="1" placeholder="输入消息…"></textarea>
+  <button id="send" disabled>发送</button>
+</div>
+
+<script type="module">
+import { Wllama } from 'https://cdn.jsdelivr.net/npm/@wllama/wllama@2.3.1/esm/index.js';
+
+const CDN_BASE = 'https://cdn.jsdelivr.net/npm/@wllama/wllama@2.3.1/esm/wasm/';
+const HF_BASE = 'https://huggingface.co/';
+
+let wllama = null;
+let isGenerating = false;
+const chat = document.getElementById('chat');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const statusEl = document.getElementById('status');
+const progressBar = document.getElementById('progress-bar');
+const loadBtn = document.getElementById('load-btn');
+const modelSelect = document.getElementById('model-select');
+
+function setStatus(text, cls = '') {
+  statusEl.textContent = text;
+  statusEl.className = cls;
+}
+
+function addMessage(text, role) {
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+async function loadModel() {
+  if (wllama) return;
+  loadBtn.disabled = true;
+  setStatus('初始化 wllama…', 'loading');
+
+  try {
+    wllama = new Wllama({
+      'single-thread/wllama.wasm': CDN_BASE + 'single-thread/wllama.wasm',
+      'multi-thread/wllama.wasm': CDN_BASE + 'multi-thread/wllama.wasm',
+    });
+
+    const modelPath = modelSelect.value;
+    const fullUrl = HF_BASE + modelPath;
+
+    setStatus('下载模型…首次可能需要几分钟', 'loading');
+
+    await wllama.loadModelFromUrl(fullUrl, {
+      n_ctx: 32768,
+      n_gpu_layers: 999,
+      progressCallback: ({ loaded, total }) => {
+        if (total > 0) {
+          const pct = ((loaded / total) * 100).toFixed(1);
+          progressBar.style.width = pct + '%';
+          setStatus(`下载中 ${pct}%`, 'loading');
+        }
+      },
+    });
+
+    progressBar.style.width = '100%';
+    setStatus('模型已加载，可以开始对话', 'ready');
+    sendBtn.disabled = false;
+  } catch (e) {
+    setStatus('加载失败：' + e.message, 'error');
+    loadBtn.disabled = false;
+    console.error(e);
+  }
+}
+
+async function generate() {
+  const text = input.value.trim();
+  if (!text || isGenerating || !wllama) return;
+
+  isGenerating = true;
+  sendBtn.disabled = true;
+  input.value = '';
+  input.style.height = 'auto';
+
+  addMessage(text, 'user');
+  const assistantDiv = addMessage('', 'assistant');
+
+  try {
+    const stream = await wllama.createCompletion(text, {
+      nPredict: 2048,
+      sampling: { temp: 0.7, top_k: 40, top_p: 0.95 },
+      stream: true,
+      useCache: true,
+    });
+
+    let full = '';
+    for await (const chunk of stream) {
+      if (chunk.choices && chunk.choices[0]?.text) {
+        full += chunk.choices[0].text;
+        assistantDiv.textContent = full;
+        chat.scrollTop = chat.scrollHeight;
+      }
+    }
+    if (!full) assistantDiv.textContent = '(空响应)';
+  } catch (e) {
+    assistantDiv.textContent = '生成出错：' + e.message;
+  }
+
+  isGenerating = false;
+  sendBtn.disabled = false;
+  input.focus();
+}
+
+loadBtn.addEventListener('click', loadModel);
+
+sendBtn.addEventListener('click', generate);
+
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    generate();
+  }
+});
+
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+});
+
+// 检测 WebGPU
+if (!navigator.gpu) {
+  setStatus('浏览器不支持 WebGPU，将使用 WASM（速度较慢）', 'loading');
+}
+</script>
+</body>
+</html>
